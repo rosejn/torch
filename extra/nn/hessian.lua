@@ -261,6 +261,74 @@ function nn.hessian.enable()
       end
    end
 
+   require 'pprint'
+
+   -- Returns parameters grouped by their underlying storage, and sorted by their offset.
+   local function paramsByStorage(params)
+       local param_groups = {}
+
+       -- Group by storage
+       for i=1, #params do
+           local store = params[i]:storage()
+
+           if param_groups[store] then
+               table.insert(param_groups[store], params[i])
+           else
+               param_groups[store] = { params[i] }
+           end
+       end
+
+       -- Sort groups by storage offset
+       for _, group in pairs(param_groups) do
+           print("group size: " .. #group)
+           table.sort(group, function(a, b)
+               return a:storageOffset() < b:storageOffset()
+           end)
+       end
+
+       return param_groups
+   end
+
+
+   -- Returns the amount of underlying storage required for a group of params.
+   local function computeGroupStorage(group)
+       local size   = group[1]:nElement()
+       local offset = group[1]:storageOffset() + size
+
+       print("group size: " .. size .. " offset: " .. offset)
+
+       if #group == 1 then
+           return size
+       end
+
+       for i=2, #group do
+           local param    = group[i]
+           local p_offset = param:storageOffset()
+           local p_size   = param:nElement()
+           local diff
+
+           -- If the parameter offset is less than the current offset we have a
+           -- weight shared parameter.  Check if it's a partial weight share and
+           -- add to the size accordingly, otherwise it's already accounted for.
+           if (p_offset < offset) and ((p_offset + p_size) > offset) then
+               diff   = (p_size - (offset - p_offset))
+               size   = size + diff
+               offset = offset + diff
+           else
+               size   = size + p_size
+               offset = offset + p_size
+           end
+       end
+
+       return size
+   end
+
+
+   local function copyParamGroup(group, target)
+
+   end
+
+
    function nn.Module.getParameters(self)
       -- get parameters
       local parameters,gradParameters,hessianParameters = self:parameters()
@@ -284,7 +352,9 @@ function nn.hessian.enable()
                nParameters = nParameters + parameters[k]:storage():size()
             end
          end
-         
+
+         print("nParameters: " .. nParameters)
+
          local flatParameters = torch.Tensor(nParameters):fill(1)
          local flatStorage = flatParameters:storage()
 
@@ -297,7 +367,7 @@ function nn.hessian.enable()
             parameters[k]:zero()
          end
          if (flatParameters:sum() ~= 0) then
-            print("<getParameters()> WARNING: found " 
+            print("<getParameters()> WARNING: found "
                   .. flatParameters:sum() .. " holes in the parameters vector (i.e. "
                .. flatParameters:sum() .. " storage elements that are unused, this "
             .. "might be an issue for your optimization procedure)")
@@ -310,6 +380,20 @@ function nn.hessian.enable()
       end
 
       -- flatten parameters and gradients
+      local size = 0
+      local groups = paramsByStorage(parameters)
+      for _, group in pairs(groups) do
+          size = size + computeGroupStorage(group)
+      end
+      print("Computed size: " .. size)
+
+      local flattened = torch.Tensor(size)
+      local offset = 0
+
+      for _, group in pairs(groups) do
+          copyParamGroup(flattened, group, offset)
+      end
+
       local flatParameters = flatten(parameters)
       local flatGradParameters = flatten(gradParameters)
       local flatHessianParameters
